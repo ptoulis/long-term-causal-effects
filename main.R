@@ -1,515 +1,354 @@
-## New experiments for long-term causal effects.
-#
-#  Glossary
-# -------------------
-# b = behavior 
-# beta = distribution over behaviors, 
-# beta_0t = matrix of betas (column is time.)
-#
-# beta_free
-#
-# a = action
-# alpha = distribution over actions.
-# alpha_0t = matrix of alphas.
-
+## Main script
 rm(list=ls())
-dataset = data.frame(Game = c(1, 1, 1, 1, 2, 2, 2, 2),
-                     Session = c(1, 1, 2, 2, 1, 1, 2, 2),
-                     Period = c("early", "late", "early", "late", "early", "late", "early", "late"),
-                     Obs = c(1, 1, 1, 0, 1, 1, 1, 0),
-                     A1 = c(0.308, 0.293, 0.273, 0.295, 0.258, 0.290, 0.355, 0.323),
-                     A2 = c(0.307, 0.272, 0.350, 0.292, 0.367, 0.347, 0.313, 0.270),
-                     A3 = c(0.113, 0.162, 0.103, 0.113, 0.105, 0.118, 0.082, 0.093),
-                     A4 = c(0.120, 0.100, 0.123, 0.135, 0.143, 0.110, 0.100, 0.105),
-                     A5 = c(0.152, 0.173, 0.151, 0.165, 0.127, 0.135, 0.150, 0.209),
-                     B1 = c(0.350, 0.333, 0.353, 0.372, 0.332, 0.355, 0.355, 0.343),
-                     B2 = c(0.218, 0.177, 0.133, 0.192, 0.115, 0.198, 0.215, 0.243),
-                     B3 = c(0.202, 0.190, 0.258, 0.222, 0.245, 0.208, 0.187, 0.168),
-                     B4 = c(0.092, 0.140, 0.102, 0.063, 0.140, 0.108, 0.110, 0.107),
-                     B5 = c(0.138, 0.16, 0.154, 0.151, 0.168, 0.131, 0.133, 0.139))
-
-# Parameters
-# lambda = QLk model,  phi = Dirichlet prior, psi = VAR model.
 source("games.R")
-library(mvtnorm)
-# library(gtools) # for Dirichlet
+source("qre.R")
+source("qlk.R")
+source("simplex.R")
 
-logdirichlet <- function(x, alpha) {
-  stopifnot(all(alpha > 0))
-  stopifnot(all(x > 0) && all(x < 1))
-  A1 = sum((alpha - 1) * log(x))
-  A2 = sum(log(gamma(alpha))) - log(gamma(sum(alpha)))
-  A1 - A2
+# stop("fix dataset for N=120")
+
+lieberman <- function() {
+  ## Reproduces Table III in the QRE paper.
+  game = game.lieberman()
+  obs.ms =  c(0.167, 0.027, 0.806, 0.013, 0.227, 0.76)  ## at time 11-20
+  obs.ms =  c(0.053, 0.047, 0.9, 0.027, 0.053, 0.92) # at time 151-160
+  lambda.mle = qre.mle(game, obs.ms, N=300 * 10, nLambdas = 500)
+  print(sprintf("MLE for lambda (QRE) = %.3f", lambda.mle))
+  print(paste(rep("=", 50), collapse=""))
+  # QLk
+  best.qlk = qlk.mle(game, obs.ms, N = 300 * 10)
+  print(unlist(best.qlk))
 }
 
-Behaviors = c(1, 2, 3) # QL3 model.
-numBehaviors = length(Behaviors) # number of behaviors.
-Actions = c(1, 2, 3, 4, 5) # actions.
-numActions = length(Actions) # number of actions.
-a_unif = rep(1, numActions)/numActions
-
-CHECK_simplex <- function(x) {
-  stopifnot(abs(sum(x)-1) < 1e-8 && all(x >= 0))
-}
-
-## Helper functions
-logistic <- function(v) {
-  v[v > 25] <- 25
-  v[v < -25] <- -25
-  exp(v) / sum(exp(v))
+random.proportion <- function(p) {
+  # random proportion of lengthp 
+  fix.proportion(rdirichlet(1, alpha=rep(1/p, p)))
 }
 
 
-alpha_b <- function(lambda, b, Pj) {
-  # Get action frequency given behavior and QLk model.
-  #
-  alpha = rep(0, numActions)
-  
-  if(b==1) {
-    alpha = a_unif
-  } else if(b==2){
-    # actions of other player
-    alpha_other = a_unif
-    util = Pj %*% alpha_other
-    lam = lambda[1]
-    alpha = logistic(util * lam)
-  } else {
-    lam12 = lambda[2]
-    # get the adversarial actions
-    alpha_other = alpha_b(c(lam12), b=2, -t(Pj))
-    util = Pj %*% alpha_other
-    lam = lambda[2]
-    alpha = logistic(util * lam)
+fix.proportion <- function(prop, tol=1e-2) {
+  i = which(prop < tol)
+  if(length(i) > 0) {
+    prop[i] <- tol
+    s = 1 - length(i) * tol
+    prop[-i] = prop[-i] * s
   }
-  CHECK_simplex(alpha)
-  return(alpha)
+  return(as.vector(prop / sum(prop)))
 }
 
-alpha_beta <- function(lambda, beta, Pj) {
-  # Given a distribution over behaviors, return the distribution over actions.
+# rapoport.mcmc <- function() {
+load("rapoport.rda")
+game.rap = game.rapoport(W=10, L=-6)
+num.actions = ncol(game.rap[[1]])  ## no of actions.
+# dataset = rapoport[1:3, ]
+dataset = rapoport[5:7, ]
+
+num.periods = nrow(dataset)
+long.term = rapoport[4,]
+A0t = as.matrix(dataset[, 5:14])  ## action frequencies
+N = 120
+kMix = 0.9
+kProposal.sd = 0.02
+# Diffusion for player A
+diffusion.A = A0t[, 1:5]
+diffusion.B= A0t[, 6:10]
+
+print(sprintf("Rapoport(1992) No of actions %d", num.actions))
+
+## x = state of the chain.
+log.lik <- function(x) {
+  # Log-likelihood using 
+  ## qlk.parameters and diffusion parameters.
+  #   qlk = list(At, lambda1, lambda12, lambda2)
+  #   psi = list(beta, sigma, mu)
+  #   data = A0t matrix action frequencies for both players.
+  qlk = x$qlk
+  stopifnot(ncol(data)==ncol(A0t))
+  ll.qlk = sum(sapply(1:nrow(A0t), function(i) {
+    obs.ms = A0t[i,] # observed mixed strategy at round i
+    par = list(a0=qlk$At[i, 1], a1=qlk$At[i, 2], a2=qlk$At[i, 3],
+               lambda1=qlk$lambda1, lambda12=qlk$lambda12, lambda2=qlk$lambda2)
+    qlk.logLikelihood(par, game = game.rap, obs.ms, N)
+  }))
+  ## QlK with priors.
+  
+  ll.qlk.prior = dexp(qlk$lambda1, mean=2, sd=1.5, log=T) +
+    dnorm(qlk$lambda12, mean=2, sd=1.5,  log=T) + 
+    dnorm(qlk$lambda2, mean=2, sd=1.5,  log=T)
+  ll.qlk <- ll.qlk + ll.qlk.prior
+  psi = x$psi
+  # Diffusion with prors.
+  # psi$mu = colMeans(qlk$At)
+  ll.diffusion = diffusion.logLikelihood(qlk$At, psi) + diffusion.logLikelihood(qlk$At, psi) 
+  ll.diffusion.prior = -log(psi$sigma^2)
+  
+  ll.diffusion <- ll.diffusion + ll.diffusion.prior
+  
+  ll.qlk + ll.diffusion 
+}
+
+## Proposal functions
+## 
+propose.perturb.one <- function(z) {
+  ## used for slight perturbations in the params
+  stopifnot(z >= 0)
+  w = log(z)
+  w.new = rnorm(1, mean=w, sd = kProposal.sd)
+  return(exp(w.new))
+}
+
+## Computes log.density(x.new -> x.old) - log.density(x.old -> x.new)
+log.density.perturb <- function(z.old, z.new) {
+  # dnorm(z.new, mean=z.old, sd=kSD, log=T)
+  w.old = log(z.old)
+  w.new = log(z.new)
+  dnorm(w.new, mean=w.old, sd=kProposal.sd, log=T)
+}
+
+sample.x0 <- function() {
+  # samples starting point for MCMC.
+  x = list(qlk=list(At=matrix(1/3, nrow=num.periods,ncol=3), 
+                    lambda1=.5, lambda12=.55, lambda2=.5),
+           psi=list(beta=runif(1), sigma=0.5, mu=random.proportion(3)))
+  return(x)
+}
+
+propose.new.x <- function(x.old) {
+  # Proposes new state.
   #
-  # checks.
-  beta = as.numeric(beta)
-  CHECK_simplex(beta)
-  stopifnot(length(beta) == numBehaviors)
-  alpha = rep(0, numActions)
-  
-  for(b in 1:numBehaviors) {
-    b_freq = beta[b]
-    alpha = alpha + b_freq * alpha_b(lambda, b, Pj)
-  }  
-  CHECK_simplex(alpha)
-  return(alpha)
-}
-
-alpha0t_beta0t <- function(lambda, beta0t, Pj) {
-  to = ncol(beta0t)
-  alpha0t = matrix(0, nrow=numActions, ncol=to)
-  
-  for(t in 1:to) {
-    alpha0t[, t] <- alpha_beta(lambda, beta0t[,t], Pj)
+  propose.perturb.matrix <- function(A) {
+    j = sample(1:nrow(A), size=1)
+    u = random.proportion(ncol(A))
+    A.new = A
+    A.new[j, ] = kMix * A.new[j, ] + (1-kMix) * u  ## new composition
+    stopifnot(all(abs(1-rowSums(A.new)) < 1e-5))
+    return(A.new)
   }
-  return(alpha0t)
+  
+  At.old = x.old$qlk$At
+  At.new = propose.perturb.matrix(At.old)
+  
+  # propose lambdas
+  lambda1 = propose.perturb.one(x.old$qlk$lambda1)
+  lambda12 = propose.perturb.one(x.old$qlk$lambda12)
+  lambda2 = propose.perturb.one(x.old$qlk$lambda2)
+  
+  # Propose new diffusion param
+  sigma = propose.perturb.one(x.old$psi$sigma)
+  beta = kMix * x.old$psi$beta + (1-kMix) * rbeta(1, shape1=1, shape=2)
+  
+  mu = 0.95 * x.old$psi$mu + (0.05) * colMeans(At.new) # there are three behaviors.
+ 
+  
+  x.new = x.old
+  x.new$qlk$At = At.new
+  x.new$qlk$lambda1 = lambda1
+  x.new$qlk$lambda12 = lambda12
+  x.new$qlk$lambda2 = lambda2
+  x.new$psi$beta = beta
+  x.new$psi$sigma = sigma
+  # x.new$psi$mu = mu
+  return(x.new)
 }
 
-logdensity.alpha0t_beta0t <- function(lambda, alpha0t, beta0t, Pj) {
-  expected_alpha0t = alpha0t_beta0t(lambda, beta0t, Pj)
-  
-  logd = 0
-  to = ncol(alpha0t)
-  stopifnot(to > 1 || ncol(beta0t) != ncol(alpha0t))
-  N = 1000
-  
-  for(t in 1:to) {
-    counts = alpha0t[,t] * N
-    prob_t = expected_alpha0t[, t]
-    logd <- logd + dmultinom(counts, size = N, prob = prob_t, log = T)
-  }
-  return(logd)
-}
-
-sample.alpha_beta0t <- function(lambda, psi, beta0t, Pj) {
-  
-  to = ncol(beta0t)
-  stopifnot(to > 1 || ncol(beta0t) != ncol(alpha0t))
-  beta_t = beta0t[, to]
-  
-  betaFree.old = betaFree_beta(beta_t)
-  mu = matrix(head(psi, 2), ncol=1)
-
-  p = length(betaFree.old)
-  I = 0.5 * diag(p)
-  
-  x0 = (0.2 * betaFree.old + 0.8 * mu) 
- # print(dim(x0))
-  et = t(rmvnorm(1, mean=rep(0, p), sigma=I))
-#  print(dim(et))
-  betaFree.new = x0 + et
-
-  beta_next = beta_betaFree(betaFree.new)
-  expected_alpha = alpha_beta(lambda, beta_next, Pj)
-  
-  N = 1000
-  alpha_next = rmultinom(1, size = N, prob = expected_alpha)/N
-  return(alpha_next)
-}
-
-
-###      Time-series model.
-betaFree_beta <- function(beta) {
-  stopifnot(length(beta) == numBehaviors)
-  CHECK_simplex(beta)
-  
-  if(beta[1]==0) {
-    beta[1] = 1e-5
-    # beta[2:numBehaviors] = (1-beta[1]) * beta[2:numBehaviors]
-    beta = beta / sum(beta)
-  }
-  CHECK_simplex(beta)
-  
-  # Transform to free parameters.
-  betaFree = log(beta[2:numBehaviors] / beta[1])
-  return(betaFree)
-}
-
-beta_betaFree <- function(betaFree) {
-  x = c(0, betaFree)
-  z = exp(x) / sum(exp(x))
-  # sanitize
-  f = 1e-5
-  index = which(z < f)
-  if(length(index) > 0) {
-    z[index] <- f 
-    z[-index] <- z[-index] * (1-length(index) * f) / sum(z[-index])
-  }
-  return(z)
-  
-}
-
-logdensity.VAR <- function(psi, beta.new, beta.old) {
+log.density.proposal.diff <- function(x.new, x.old) {
+  # Only lambda1, lambda12, lambda2, sigma, mu are changed:
   #
-  # beta.new = psi[1, 2] + psi[3] * beta.old + psi[4] * e
-  #
-  stopifnot(length(psi)==4)
-  #stopifnot(psi[3] != 0)
-  if(psi[4]==0) return(-1e10)
-  
-  betaFree.new = betaFree_beta(beta.new)
-  betaFree.old = betaFree_beta(beta.old)
-  mu = matrix(head(psi, 2), ncol=1)
-  # residual
-  # not going to matter.
-  # TODO(ptoulis): Is this ok?
-  # psi[4] = .1
-  # et = as.numeric((betaFree.new - psi[3] * betaFree.old - mu) / psi[4])
-  et = as.numeric(betaFree.new - (0.2 * betaFree.old + 0.8 * mu))
-  p = length(betaFree.new)
-  I = 0.5 * diag(p)
-  # print(et)
-  lt = dmvnorm(et, mean=rep(0, p), sigma=I, log=T)
-  # print(lt)
-  return(lt)
-}
-
-logdensity.beta0t <- function(psi, phi, beta0t) {
-  to = ncol(beta0t)
-  stopifnot(to > 1)
-  beta_0 = beta0t[, 1]
-  
-  # Prior
-  logd = logdirichlet(beta_0, phi)
-  
-  # Iterate from t=2 to t=to
-  if(to > 1) {
-    for(t in 2:to) {
-      beta.new = beta0t[, t]
-      beta.old = beta0t[, t-1]
-      # print(sprintf("t=%d logD(%d)=%.2f", t, t-1, logd))
-      logd <- logd + logdensity.VAR(psi, beta.new, beta.old)
-    } 
+  # Compute ll(x' -> x) - ll(x -> x')
+  ll = 0
+  get.diff <- function(parname, el) {
+    ll.new.old = log.density.perturb(x.new[[parname]][[el]], x.old[[parname]][[el]]) 
+    ll.old.new = log.density.perturb(x.old[[parname]][[el]], x.new[[parname]][[el]]) 
+    ll.new.old - ll.old.new
   }
-  return(logd)
+  for(coeff in c("lambda1", "lambda12", "lambda2")) {
+    ll <- ll + get.diff("qlk", coeff)
+  }
+  # sigma.
+  ll <- ll + get.diff("psi", "sigma")
+
+  return(ll)
 }
 
-viterbi <- function(alpha0t, Payoff) {
-  # Finds marginal-likelihood MLE
-  #
-  #
-  # par = (2 * to, lambda>0, psi, phi)
-  to = ncol(alpha0t)
-  numFlatBeta = (numBehaviors-1) * to
+mh.ratio.prob <- function(x.old, x.new) {
+  dl = log.lik(x.new) - log.lik(x.old) + log.density.proposal.diff(x.new, x.old)
+  stopifnot(!is.na(dl))
+  return(min(1, exp(dl)))
+}
+
+# }
+
+explore.likelihood <- function() { 
+  x0 = x
+  print(log.lik(x))
+  par(mfrow =c(3, 2))
+  l = seq(1e-2, 10, length.out=100)
+  for(j in c("lambda1", "lambda12", "lambda2")) {
+    y = sapply(l, function(i) { x$qlk[[j]] <- i; log.lik(x) })
+    plot(l, y, type="l", main=j)
+    abline(v=x0$qlk[[j]], col="red")
+  }
+  for(j in c("sigma", "beta")) {
+    if(j=="beta") l = seq(0, 1-1e-3, length.out=100)
+    y = sapply(l, function(i) { x$psi[[j]] <- i; log.lik(x) })
+    plot(l, y, type="l", main=j)
+  }
   
-  flat_beta0t <- function(beta0t) {
-    # transform beta0t to free parameters.
-    #
-    par = c()
-    for(t in 1:ncol(beta0t)) {
-      betaFree_t = betaFree_beta(beta = beta0t[,t])
-      par = c(par, as.numeric(betaFree_t))
+}
+
+check.proposal <- function(niters=100) {
+  mcmc_x.old = sample.x0()
+  
+  diff.ll  = c()
+  mh.ratio = c()
+  acc = c()
+  nacc = 0
+  for(i in 1:niters) {
+    # print(unlist(mcmc_x.old))
+    mcmc_x.new = propose.new.x(mcmc_x.old)
+    diff.ll[i] = log.lik(mcmc_x.new) - log.lik(mcmc_x.old)
+    mh.ratio[i] = mh.ratio.prob(mcmc_x.old, mcmc_x.new)
+    acc[i] = min(1, exp(log.density.proposal.diff(mcmc_x.new, mcmc_x.old)))
+    if(runif(1) < mh.ratio[i]) {
+      mcmc_x.old = mcmc_x.new
+      nacc <- nacc + 1
     }
-    return(par)
   }
-  
-  beta0t_flat <- function(beta0t_flat) {
-    # transform from free parameter
-    #
-    stopifnot(to == length(beta0t_flat)/2)
-    beta0t = matrix(0, ncol=to, nrow=numBehaviors)
-    for(t in 1:to) {
-      index = c(2*t-1, 2*t)
-      beta0t[, t] = beta_betaFree(betaFree = beta0t_flat[index])
-    }
-    return(beta0t)
-  } 
-  
-  translate.par <- function(x) {
-    beta0t = beta0t_flat(head(x, numFlatBeta))
-    lambda = x[seq(numFlatBeta+1, numFlatBeta+3)]
-    psi = x[seq(numFlatBeta+4, numFlatBeta+7)]
-    phi = x[seq(numFlatBeta+8, numFlatBeta+10)]
-    return(list(beta0t=beta0t, lambda=lambda, psi=psi, phi=phi))
-  }
-  
-  objective <- function(par) {
-    params = translate.par(par)
-    # log-likelihoods.
-    loglik_a_b = logdensity.alpha0t_beta0t(lambda = params$lambda, 
-                                           alpha0t = alpha0t, 
-                                           beta0t = params$beta0t, 
-                                           Pj=Payoff)
-    
-    loglik_b = logdensity.beta0t(params$psi, params$phi, params$beta0t)
-    # Shrink to equilbrium
-    alpha.Eq = c(0.375, 0.25, rep(0.125, 3))  # By 
-    beta.Eq = beta_betaFree(betaFree = head(params$psi, 2))
-    alpha.Eq_pred = alpha_beta(lambda = params$lambda, beta = beta.Eq, Pj = Payoff)
-    penalty = 100 * sum((alpha.Eq - alpha.Eq_pred)**2)
-
-    
-    print(penalty)
-    print(alpha.Eq_pred)
-    print(alpha.Eq)
-    print("loglik a_b")
-    print(loglik_a_b)
-    print("loglik b")
-    print(loglik_b)
-    #
-    stopifnot(is.numeric(loglik_a_b) || is.numeric(loglik_b))
-    return(-loglik_a_b - loglik_b + penalty)
-  }
-  
-  ## Optimization
-  print(numFlatBeta)
-  par0 = c(rep(0, numFlatBeta), rep(0, 3), rep(1, 4), rep(1, 3))
-  x = optim(par = par0, fn = objective, method = "L-BFGS-B",
-            lower=c(rep(-100, numFlatBeta), rep(1e-3, 3), rep(-10, 4), rep(1e-3, 3)),
-             upper=c(rep(100, numFlatBeta), rep(20, 3), rep(10, 4), rep(1, 3)))$par
-  print(-objective(x))
-  print(-objective(par0))
-  
-  
-  return(translate.par(x))
+  par(mfrow=c(3, 1))
+  hist(diff.ll)
+  hist(mh.ratio)
+  hist(acc)
+  print(sprintf("Total accepts %.1f%%", 100 * nacc / niters))
 }
 
-viterbi.both <- function(alpha0t_A, Payoff_A,
-                         alpha0t_B, Payoff_B) {
-  # Finds marginal-likelihood MLE
-  #
-  #
-  # par = (2 * to, lambda>0, psi, phi)
-  to = ncol(alpha0t_A)
-  numFlatBeta = (numBehaviors-1) * to
+run.mcmc <- function(niters.mcmc) {
+  mcmc_x.old = sample.x0()
+  nacc <- 0
+  mcmc.out = list()
+  mcmc.out[[1]] = mcmc_x.old
+  checkpoints = seq(100, niters.mcmc, by=1500)
   
-  flat_beta0t <- function(beta0t) {
-    # transform beta0t to free parameters.
-    #
-    par = c()
-    for(t in 1:ncol(beta0t)) {
-      betaFree_t = betaFree_beta(beta = beta0t[,t])
-      par = c(par, as.numeric(betaFree_t))
+  for(j in 2:niters.mcmc) {
+    mcmc_x.new = propose.new.x(mcmc_x.old)
+    acc = mh.ratio.prob(mcmc_x.old, mcmc_x.new)
+    if(j %in% checkpoints) {
+      print(sprintf("(%d/%d) Acceptance %.1f%%", j, niters.mcmc, 100 * nacc / j))
+      plot.mcmc(mcmc.out)
     }
-    return(par)
-  }
-  
-  beta0t_flat <- function(beta0t_flat) {
-    # transform from free parameter
-    #
-    stopifnot(to == length(beta0t_flat)/2)
-    beta0t = matrix(0, ncol=to, nrow=numBehaviors)
-    for(t in 1:to) {
-      index = c(2*t-1, 2*t)
-      beta0t[, t] = beta_betaFree(betaFree = beta0t_flat[index])
+    if(runif(1) < acc) {
+      # accept move.
+      mcmc_x.old <- mcmc_x.new
+      nacc = nacc + 1
+      # print(sprintf("%d/%d", nacc, niters.mcmc))
     }
-    return(beta0t)
-  } 
-  
-  translate.par <- function(x) {
-    beta0t_A = beta0t_flat(x[1:numFlatBeta])
-    beta0t_B = beta0t_flat(x[seq(numFlatBeta + 1, 2 * numFlatBeta)])
     
-    offset = 2 * numFlatBeta
-    lambda = x[seq(offset + 1, offset+3)]
-    psi = x[seq(offset + 4, offset + 7)]
-    phi = x[seq(offset + 8, offset + 10)]
-    return(list(beta0t_A=beta0t_A, beta0t_B=beta0t_B, 
-                lambda=lambda, psi=psi, phi=phi))
+    mcmc.out[[j]] <- mcmc_x.old
   }
-  
-  objective <- function(par, player) {
-    params = translate.par(par)
-    
-    alpha0t = NA
-    if(player=="A") {
-      alpha0t = alpha0t_A
-      beta0t = params$beta0t_A
-      P = Payoff_A
-    } else {
-      alpha0t = alpha0t_B
-      beta0t = params$beta0t_B
-      P = Payoff_B
-    }
-  
-    # log-likelihoods.
-    loglik_a_b = logdensity.alpha0t_beta0t(lambda = params$lambda, 
-                                           alpha0t = alpha0t, 
-                                           beta0t = beta0t, 
-                                           Pj=P)
-    
-    loglik_b = logdensity.beta0t(params$psi, params$phi, beta0t)
-    # Shrink to equilbrium
-    alpha.Eq = c(0.375, 0.25, rep(0.125, 3))  # By 
-    beta.Eq = beta_betaFree(betaFree = head(params$psi, 2))
-    alpha.Eq_pred = alpha_beta(lambda = params$lambda, beta = beta.Eq, Pj = P)
-    
-    shrinkage_one = 1e4 * sum((alpha.Eq - alpha.Eq_pred)**2) 
-    shrinkage_two = 5  * sum((params$lambda - c(0.5, 0.2, 1.9))**2)
-    shrinkage_three = -1 * sum(diff(params$beta0t[1, ]))
-    penalty = shrinkage_one + shrinkage_two + shrinkage_three
-    
-        
-#       print(shrinkage_one)  
-#     print("shrinkage from lambda")
-#     print(params$lambda)
-#     print(shrinkage_two)
-#     
-#       print(shrinkage_three)
-#         print("penalty")
-#         print(penalty)
-#         # print(alpha.Eq_pred)
-#         # print(alpha.Eq)
-#         print("loglik a_b")
-#         print(loglik_a_b)
-#         print("loglik b")
-#         print(loglik_b)
-    
-    stopifnot(is.numeric(loglik_a_b) || is.numeric(loglik_b))
-    return(-loglik_a_b - loglik_b + penalty)
-  }
-  
-  ## Optimization
-  par0 = c(rep(0, numFlatBeta), rep(0, numFlatBeta),
-           rep(0, 3), rep(1, 4), rep(1, 3))
-  
-  total.objective <- function(par) {
-    objective(par, "A") + objective(par, "B")
-  }
-  
-  x = optim(par = par0, fn = total.objective, method = "L-BFGS-B",
-            lower=c(rep(-20, 2 * numFlatBeta), rep(1e-3, 3), rep(-10, 4), rep(1e-3, 3)),
-            upper=c(rep(20, 2 * numFlatBeta), rep(20, 3), rep(10, 4), rep(1, 3)))$par
-  print(-total.objective(x))
-  print(-total.objective(par0))
-  
-  
-  return(translate.par(x))
+  # plot results.
+  plot.mcmc(mcmc.out, add.pop=T)
+  return(mcmc.out)
 }
 
-
-fit.rapoport <- function() {
-  alpha0t_rowPlayer = t(dataset[1:3, 5:9])
-  alpha_A_true =  t(dataset[4, 5:9])
-  # alpha_A_2_true =  t(dataset[4, 5:9])
-  
-  alpha0t_colPlayer =  t(dataset[1:3, 10:14])
-  alpha_B_true =  t(dataset[4, 10:14])
-  D = cbind(alpha0t_rowPlayer, alpha0t_colPlayer)
-  colnames(D) <- c()
-  
-  Payoff_A = game.rapoport(1, -1)$A
-  Payoff_B = game.rapoport(1, -1)$B
-  
-  params <- NA
-  if(file.exists("model.rda")) {
-    print("Loading model")
-    print(params)
-    load("model.rda")
-  } else {
-    print("Fitting model.")
-    params = viterbi.both(alpha0t_rowPlayer, Payoff_A, alpha0t_colPlayer, Payoff_B)
-    save(params, file="model.rda")
-    print("Model saved.")
+plot.mcmc <- function(mcmc.obj, burnin.f=0.6, add.pop=F) {
+  niters.mcmc = length(mcmc.obj)
+  burnin = niters.mcmc * burnin.f
+  ## plotting!
+  par(mfrow=c(2,2))
+ # xlab = c("iteration")
+  for(coeff in c("lambda1", "lambda12")) {#}, "lambda2")) {
+    y = unlist(lapply(mcmc.obj, function(x) x$qlk[[coeff]]))[burnin:niters.mcmc]
+    plot(y, xlab="iteration", ylab=coeff, type="l")
   }
   
-  ##  Estimation process.
-  taus = c()
-  dids = c()
-  naives = c()
-  longs = c()
-  
-  for(i in 1:25) {
-    # coefficient
-    cR = runif(10, min=0, max=1)
+  for(coeff in c("beta")) {#}, "sigma")) {
+    y = unlist(lapply(mcmc.obj, function(x) x$psi[[coeff]]))[burnin:niters.mcmc]
+    plot(y, ylab="psi0", xlab="iteration", type="l")
+  }
+  if(add.pop) {
+    i = sample(seq(1, niters.mcmc-burnin), size=1500, replace=F)
     
-    get.estimand <- function(alpha_A, alpha_B) {
-      sum(cR * c(alpha_A, alpha_B))
-    }
-    alpha.Eq = c(0.375, 0.25, rep(0.125, 3))
-    tau = get.estimand(alpha.Eq, alpha.Eq)
-    did = get.estimand(alpha0t_rowPlayer[,3], alpha0t_colPlayer[,3])
-    naive = get.estimand(alpha0t_rowPlayer[,1], alpha0t_rowPlayer[,1])
-    taus = c(taus, tau)
-    dids = c(dids, did)
-    naives = c(naives, naive)
-    # our method
-    longterm = c()
-    for(j in 1:100) {
-      alpha_A_sample = sample.alpha_beta0t(params$lambda, params$psi, beta0t = params$beta0t_A, Pj = Payoff_A)
-      alpha_B_sample = sample.alpha_beta0t(params$lambda, params$psi, beta0t = params$beta0t_B, Pj = Payoff_B)  
-      # print(alpha_A_sample)
-      longterm = c(longterm, get.estimand(alpha_A_sample, alpha_B_sample))
-    }
-    longs = c(longs, median(longterm))
-  }
-  plot(taus, taus, type="l", xlab =expression(paste("ground truth  (", tau, ") ")), 
-       ylab=expression(paste("ground truth  (", tau, ") ")), col="white", xlim=c(0.5, 1.5), ylim=c(0.5, 1.5))
-  sub = seq(1, length(taus), length.out=10)
-  z = seq(0.5, 1.5, length.out=100)
-  lines(z, z, lty=3, col="black")
-  points(taus, jitter(dids, amount=.0), pch=15, col="red")
-  print(summary(longs))
-  points(taus, longs, pch=17, col="blue")
-  points(taus, jitter(naives, amount=.0), pch=16, col="orange")
+    for(t in 1:3) {
+      tcol = rgb(1, 0, 0, alpha = .1)
+      if(t==2) tcol = rgb(0, 1, 0, alpha = .1)
+      if(t==3) tcol = rgb(0, 0, 1, alpha = .1)
+      lims = c(0, .8)
   
-  print(sqrt(sum(dids-taus)**2))
-  print(sqrt(sum(longs-taus)**2))
-  print(sqrt(sum(naives-taus)**2))
-  legend(1.0, 0.8, legend=c("naive", "DID", "LACE     "),
-         pch=c(16, 15, 17), col=c("orange", "red", "blue"))
+      a0 = unlist(lapply(mcmc.obj, function(x) x$qlk$At[t,1]))[burnin:niters.mcmc]
+      a1 = unlist(lapply(mcmc.obj, function(x) x$qlk$At[t,2]))[burnin:niters.mcmc]
+      a0 = a0[i]
+      a1 = a1[i]
+    
+      if(t==1) plot(a0 - 0.05 * t, a1 + 0.04 * t, xlab="b0", ylab="b1", pch=t+2, xlim=lims, ylim=lims, col=tcol)
+      else  points(a0 - 0.05 * t, a1 + 0.04 * t, pch=t+2, xlab="b0", ylab="b1",  xlim=lims, ylim=lims, col=tcol)
+    }
+  }
+  
 }
 
-## SOME TESTS.
-test.viterbi <- function() {
-  alpha0t = matrix(1/numActions, nrow=numActions, ncol=5)
-  Payoff = game.rapoport(1, -1)$A
-  print(alpha0t)
-  x = viterbi(alpha0t, Payoff)
-  print(x)
+posterior.table <- function(burnin.f=0.5) {
+  load(file="mcmc.out1e5.rda")
+  niters.mcmc = length(out)
+  burnin = niters.mcmc * burnin.f
+  group = c("qlk", "qlk", "qlk", "psi", "psi")
+  par = c("lambda1", "lambda12", "lambda2", "beta", "sigma")
+  
+  drop = function(x) print(paste(x, collapse=" & "))
+  row = c("parameter", "mean (sd)", "Q1-Q3")
+  drop(row)
+  
+  for(i in 1:5) {
+    x = sapply(burnin:niters.mcmc, function(j) as.numeric(out[[j]][[group[i]]][[par[i]]]))
+    y = c(par[i], sprintf("%.1f (%.1f)", mean(x), sd(x)), 
+          sprintf("[%.1f, %.1f]", round(quantile(x, 0.25),1), round(quantile(x, 0.75),1)))
+    drop(y)
+  }
 }
 
+posterior.inference <- function(burnin.f=0.5) {
+  load(file="mcmc.out1e5.rda")
+  load(file="mcmc.out1e5-game2.rda")
+  ## out has the samples.
+  niters.mcmc = length(out)
+  burnin = niters.mcmc * burnin.f
 
-plot.behaviors <- function() {
-  load("model.rda")
-  b0 = params$beta0t_A[1, ]
-  print(b0)
+  get.game.estimand <- function(game.id, j, verbose=F) {
+    x = out[[j]]
+    if(game.id==2) {
+      x = out2[[j]]
+    }
+    bt = x$qlk$At[3,]
+    mu = colMeans(x$qlk$At)
+    Xt = tail(logit(bt), 2)
+    mu.X = tail(logit(mu), 2)
+    beta = x$psi$beta
+    sigma = x$psi$sigma
+  #  Xt.next = beta * Xt + mu.X + sigma * rmvnorm(1, mean=, sd=1)
+    
+    bt.next = logistic(c(0, Xt.next))
+    #     print(sprintf("mu=%.2f, Xt=%s, mu.X=%s beta=%.3f sigma=%.2f bt.next=%s",
+    #                   mu, paste(round(Xt, 3), collapse=", "), paste(round(mu.X, 3), collapse=","),
+    #                   beta, sigma, paste(round(bt.next, 3), collapse=", ")))
+    if(verbose) {
+      print(sprintf("mu=%s, ....  Xt=%s,  ... mu.X=%s .... beta=%.3f ...... sigma=%.2f ... bt.next=%s",
+                    paste(round(mu, 3), collapse=", "), paste(round(Xt, 3), collapse=", "), paste(round(mu.X, 3), collapse=","),
+                    beta, sigma, paste(round(bt.next, 3), collapse=", ")))
+    }
+    aj = predict.mixedStrategy(game.rap, qlk.params = list(a0=bt.next[1], a1=bt.next[2], a2=bt.next[3],
+                                                           lambda1=x$qlk$lambda1, 
+                                                           lambda12=x$qlk$lambda12, 
+                                                           lambda2=x$qlk$lambda2))
+    return(aj)
+  }
+  
+  revenue = c()
+  for(j in burnin:niters.mcmc) {
+    revenue.factor = 1 * c(0, 1, 0, 0, 1, 0, 0, 0, 1, 1)
+    a0 = get.game.estimand(1, j)
+    a1 = get.game.estimand(2, j)
+    revenue = c(revenue, sum(revenue.factor * (a1 - a0)))
+    # print(a)
+  }
+  par(mfrow=c(1, 1))
+  hist(revenue)
+  return(revenue)
 }
-
