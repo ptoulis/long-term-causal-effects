@@ -48,9 +48,6 @@ Actions = c(1, 2, 3, 4, 5) # actions.
 numActions = length(Actions) # number of actions.
 a_unif = rep(1, numActions)/numActions
 
-CHECK_simplex <- function(x) {
-  stopifnot(abs(sum(x)-1) < 1e-8 && all(x >= 0))
-}
 
 ## Helper functions
 logistic <- function(v) {
