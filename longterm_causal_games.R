@@ -116,6 +116,13 @@ sample_B0t <- function(to_t, params, verbose=F) {
 }
 
 expected_longTerm_actions <- function(obs_actions_history, to_t, is_rowplayer, nsamples=1000) {
+  # Given data on observed action profiles (population behaviors) extrapolate and predict profile at to_t.
+  #   obs_actions_history = p x t matrix, where (ij) has frequency of action i at time j.
+  #   to_t = positive integer (long-term horizon)
+  #   is_rowplayer = {T, F}, whether we calculate profiles from the row player perspective.
+  #   nsamples = #samples to use to marginalize out model parameters and latent behaviors.
+  #
+  # Returns action profile at time to_t (on simplex).
   W <- rep(0, nrow(obs_actions_history))
   num_agents <- 20
   
@@ -127,11 +134,6 @@ expected_longTerm_actions <- function(obs_actions_history, to_t, is_rowplayer, n
       actions_i = as.integer(num_agents * obs_actions_history[, i])
       beta_i = B0t[, i]
       loglik <- loglik + likelihood_obs_actions(actions_i, beta_i, params, is_rowplayer = is_rowplayer, is_log=T)
-     # print(sprintf("k=%d, i=%d", k, i))
-    #  print(obs_actions_history[, i])
-     # print(actions_i)
-    #  print(beta_i)
-     # print(loglik)
     }
     beta_infty = B0t[, to_t]
     alpha_infty = sample_actions(20, beta_infty, params, is_rowplayer=is_rowplayer)
@@ -143,6 +145,9 @@ expected_longTerm_actions <- function(obs_actions_history, to_t, is_rowplayer, n
 }
 
 run_experiment <- function() {
+  # Where we test how well our method predicts the long-term action profile.
+  # TODO: Explain how the test is done, and propose extensions. Perhaps more datasets?
+  #
   At = t(subset(Rapoport_Data, Game==1, select=c(A1, A2, A3, A4, A5)))
   rs = seq(0, 1, length.out=5)
   # equilibrium <- c(0.375, 0.250, 0.125, 0.125, 0.125) # nash
